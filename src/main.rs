@@ -1,9 +1,15 @@
-use fltk::{prelude::*, *};
+use std::collections::HashMap;
 
-fn main() {
+use anyhow::{Result, anyhow};
+use aria2_ws::Client;
+use fltk::{prelude::*, *};
+use tokio::io::AsyncBufReadExt;
+
+#[tokio::main]
+async fn main() {      
 
     let app = app::App::default();
-    // let (app_sender, app_receiver) = app::channel();
+    let (app_sender, mut app_receiver) = tokio::sync::mpsc::channel(32);
 
     let mut main_window = window::Window::default()
         .with_size(720, 400)
@@ -31,7 +37,7 @@ fn main() {
     task_browser.set_column_widths(&[200, 60, 70, 80, 80, 50, 80]);
     task_browser.set_column_char('\t');
     task_browser.add("NAME\tSIZE\tSTATUS\tD_SPEED\tU_SPEED\tLEFT\tGID");
-
+    
     let mut opration_group = group::Pack::default().with_size(600, 25).with_type(group::PackType::Horizontal);
     opration_group.set_spacing(5);
     button::Button::new(0, 0, 80, 25, "Select All");
@@ -46,9 +52,97 @@ fn main() {
 
     main_window.end();
     main_window.show();
-    
-    app.run().unwrap();
 
+    // communicate with aria2 rpc
+    tokio::spawn(async move {
+        match start_aria2().await {
+            Ok(mut aria2) => {
+                let client = Client::connect("ws://127.0.0.1:6800/jsonrpc", None)
+                    .await.unwrap();                
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                for _ in 0..1000 {
+                    interval.tick().await;
+                    let active_status_vec = client.tell_active().await.unwrap();
+                    println!("{:?}", active_status_vec);
+                    app_sender.send(Message::UpdateTask(active_status_vec)).await.unwrap();
+                }
+            }
+            Err(e) => {
+                println!("{}", e);
+            }
+        }
+    });
+    
+    while app.wait() {
+        if let Ok(msg) = app_receiver.try_recv() {
+            match msg {
+                Message::UpdateTask(status_vec) => {
+//task_browser.add("NAME\tSIZE\tSTATUS\tD_SPEED\tU_SPEED\tLEFT\tGID");
+                    
+                    let mut gids: Vec<String> = Vec::new();
+
+                    for i in task_browser.selected_items() {
+                        if i == 1 {
+                            continue;
+                        }
+                        if let Some(text) = task_browser.text(i) {
+                            let items: Vec<&str> = text.split('\t').collect();
+                            if let Some(gid) = items.last() {
+                                gids.push(gid.to_string());
+                            }
+                        }
+                    }
+
+                    task_browser.clear();
+                    task_browser.add("NAME\tSIZE\tSTATUS\tD_SPEED\tU_SPEED\tLEFT\tGID");
+                    let mut index = 2;
+                    for status in status_vec {
+                        let gid = status.gid.clone();
+                        task_browser.add(&status_to_task_text(&status));
+                        task_browser.select(index);
+                        index = index + 1;
+                    }
+                }
+            }
+        }
+    }
+
+}
+
+fn status_to_task_text(status: &aria2_ws::response::Status) -> String {
+    // "NAME\tSIZE\tSTATUS\tD_SPEED\tU_SPEED\tLEFT\tGID"
+    let name = {
+        if status.files.len() > 1 {
+            return format!("Multifiles [{}]", status.files[0].path);
+        }
+        status.files[0].path.to_owned()
+    };
+
+    let size = status.total_length;
+    let task_status = match status.status {
+        aria2_ws::response::TaskStatus::Active => "Active",
+        _ => "Other"
+    };
+
+    let download_speed = status.download_speed;
+    let upload_speed = status.upload_speed;
+
+    let progress = {
+        if status.total_length != 0 {
+            status.completed_length / status.total_length * 100
+        } else {
+            0
+        }
+    };
+
+    let gid = status.gid.clone();
+    
+    format!("{name}\t{size}\t{task_status}\t{download_speed}\t{upload_speed}\t{progress}%\t{gid}")
+}
+
+#[derive(Debug)]
+enum Message {
+    UpdateTask(Vec<aria2_ws::response::Status>)
 }
 
 struct LinkDialog {
@@ -169,4 +263,33 @@ impl TorrentDialog {
 
         Self {  }
     }
+}
+
+async fn start_aria2() -> Result<tokio::process::Child> {
+    let mut aria2 = tokio::process::Command::new("aria2c")
+        .args(&["--enable-rpc"])        
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+        
+    let stdout = aria2.stdout.take()
+        .ok_or_else(|| anyhow!("Failed to take aria2 stdout"))?;
+
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = reader.lines();
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(line) = lines.next_line().await? {
+            if line.contains("IPv4 RPC: listening on TCP") {
+                return anyhow::Ok::<()>(());
+            }
+        }
+        Err(anyhow!("failed to run aria2c"))
+    });
+
+    match res.await? {
+        Ok(_) => { Ok(aria2) }
+        Err(_) => { Err(anyhow!("failed to run aria2c")) }
+    }
+    
 }
