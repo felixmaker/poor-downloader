@@ -1,11 +1,12 @@
 use fltk::{prelude::*, *};
 
-struct LinkInputDialog {
-    url_input: input::MultilineInput
+pub struct LinkInputDialog {
+    url_input: input::MultilineInput,
+    window: window::Window,
 }
 
 impl LinkInputDialog {
-    fn default() -> Self {
+    pub fn default() -> Self {
 
         let mut main_window = window::Window::default()
             .with_size(300, 240)
@@ -32,24 +33,30 @@ impl LinkInputDialog {
 
         main_window.end();
         main_window.make_modal(true);
-        main_window.show();
+        // main_window.show();
 
         while main_window.shown() {
             app::wait();
         }
 
-        Self { url_input }
+        Self { url_input, window: main_window }
 
     }
 
-    fn value(&self) -> String {
+    pub fn value(&self) -> String {
         self.url_input.value()
     }
+
+    pub fn show(&mut self) {
+        self.window.show();
+    }
+
+    pub fn hide(&mut self) {
+        self.window.hide();
+    }
 }
 
-struct TorrentInputDialog {
-
-}
+struct TorrentInputDialog { }
 
 impl TorrentInputDialog {
     fn default() -> Self {
